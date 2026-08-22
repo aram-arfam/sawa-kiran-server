@@ -114,9 +114,104 @@ export async function runCheck(): Promise<void> {
   }
 }
 
-/** Start the notifier — check shortly after boot, then every 3 hours. */
+/**
+ * Hour-before reminder (Arfam 2026-08-22): plans that carry a time get a
+ * second, sharper nudge ~1 hour out. Epoch-based (rawDate + "h:mm AM/PM"
+ * parsed in IST) so the day boundary can't drop a 00:30 date's reminder.
+ * Runs every 10 minutes; the (0, 60] window + per-plan dedupe means exactly
+ * one send, ~50–60 minutes before. Deliberately NOT quiet-hours gated — an
+ * imminent plan the couple made themselves is wanted at any hour.
+ */
+const parsePlanEpochIST = (rawDate: string, time: string): number | null => {
+  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rawDate.trim());
+  const tm = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(time.trim());
+  if (!d || !tm) return null;
+  let hour = Number(tm[1]) % 12;
+  if (/pm/i.test(tm[3])) hour += 12;
+  // The wall-clock moment in IST, expressed as a UTC epoch.
+  return Date.UTC(Number(d[1]), Number(d[2]) - 1, Number(d[3]), hour, Number(tm[2])) - IST_OFFSET_MS;
+};
+
+export async function runSoonCheck(): Promise<void> {
+  const now = Date.now();
+  const { today, tomorrow } = istDays();
+  try {
+    // Today + tomorrow covers the midnight edge (a 00:30 date reminds at ~23:35).
+    const events = await prisma.plannedDate.findMany({
+      where: { rawDate: { in: [today, tomorrow] }, time: { not: null } },
+      select: { id: true, coupleId: true, activity: true, rawDate: true, time: true },
+    });
+    for (const ev of events) {
+      try {
+        const target = ev.time ? parsePlanEpochIST(ev.rawDate, ev.time) : null;
+        if (target == null) continue;
+        const minsAway = (target - now) / 60_000;
+        if (minsAway <= 0 || minsAway > 60) continue;
+
+        const dedupeKey = `us:date_reminder_soon:${ev.coupleId}:${ev.id}`;
+        if (await cacheGet(dedupeKey)) continue;
+        await cacheSet(dedupeKey, '1', 24 * 60 * 60);
+
+        const activity = (ev.activity || 'Your date').trim();
+        const params = { activity, time: ev.time as string };
+        const { title, body } = renderNotif('en', 'us.date.reminderSoon', params);
+
+        await prisma.notification.create({
+          data: {
+            recipientId: ev.coupleId,
+            senderId: ev.coupleId,
+            type: 'system',
+            title,
+            message: body,
+            data: {
+              subtype: 'us_date_reminder_soon',
+              senderUserId: ev.coupleId,
+              navigate: 'UsSpace',
+              id: ev.id,
+              activity,
+              rawDate: ev.rawDate,
+              time: ev.time,
+              ...i18nData('us.date.reminderSoon', params),
+            },
+            read: false,
+          },
+        });
+        await invalidateNotifUnreadCount(ev.coupleId);
+
+        const io = (global as any).io;
+        if (io) io.to(`couple:${ev.coupleId}`).emit('notification:new', { type: 'us_date_reminder_soon' });
+
+        pushToCouple(ev.coupleId, {
+          title,
+          body,
+          data: {
+            type: 'us_date_reminder_soon',
+            subtype: 'us_date_reminder_soon',
+            navigate: 'UsSpace',
+            activity,
+            rawDate: ev.rawDate,
+            time: ev.time as string,
+            ...i18nData('us.date.reminderSoon', params),
+          },
+          collapseKey: `us_date_soon:${ev.id}`,
+        }).catch(() => null);
+
+        logger.info(`[EventReminder] hour-before nudge for couple ${ev.coupleId} — "${activity}" at ${ev.time}`);
+      } catch (err: any) {
+        logger.warn(`[EventReminder] soon-check couple ${ev.coupleId} failed: ${err.message}`);
+      }
+    }
+  } catch (err: any) {
+    logger.warn(`[EventReminder] soon-check run failed: ${err.message}`);
+  }
+}
+
+/** Start the notifier — day-before check after boot then every 3 hours; the
+ *  hour-before check every 10 minutes. */
 export const startEventReminderNotifier = (): void => {
   setTimeout(() => runCheck().catch(() => {}), 20_000); // after sockets/db settle
   setInterval(() => runCheck().catch(() => {}), 3 * 60 * 60 * 1000);
+  setTimeout(() => runSoonCheck().catch(() => {}), 30_000);
+  setInterval(() => runSoonCheck().catch(() => {}), 10 * 60 * 1000);
   logger.info('📅 Event reminder notifier scheduled (every 3h, 08–21 IST)');
 };
