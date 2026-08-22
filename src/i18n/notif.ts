@@ -435,6 +435,21 @@ const T: Record<string, Entry> = {
     },
   },
 
+  'us.date.reminderSoon': {
+    title: {
+      en: '⏰ Your date is in about an hour',
+      hi: '⏰ आपकी डेट बस एक घंटे में है',
+      kn: '⏰ ನಿಮ್ಮ ಡೇಟ್ ಇನ್ನು ಸುಮಾರು ಒಂದು ಗಂಟೆಯಲ್ಲಿ',
+      mr: '⏰ तुमची डेट साधारण तासाभरात आहे',
+    },
+    body: {
+      en: '{activity} at {time} — see you two there! 💕',
+      hi: '{activity}, {time} बजे — आप दोनों वहाँ मिलिए! 💕',
+      kn: '{activity}, {time} ಗೆ — ನೀವಿಬ್ಬರೂ ಅಲ್ಲಿ ಸಿಗೋಣ! 💕',
+      mr: '{activity}, {time} वाजता — तुम्ही दोघे तिथे भेटा! 💕',
+    },
+  },
+
   // ── Us space: mood ───────────────────────────────────────────────────────────
   'us.mood': {
     title: {

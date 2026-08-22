@@ -747,13 +747,22 @@ type ActiveGame = {
  * feature (us:game:leave keeps the session so both partners can quit the app
  * and pick the round back up; 3h killed a game paused over an evening).
  */
+/**
+ * One liveness window for a game session, shared by the challenge lock
+ * (us.socket.ts) and getActiveGame. They used to disagree (3h lock vs 24h
+ * here): between hour 3 and 24 of a stale session, the lock let a fresh
+ * challenge through but the client pre-flight saw an "active" session and
+ * silently joined it instead of challenging — the partner received nothing.
+ */
+export const GAME_SESSION_TTL_MS = 3 * 60 * 60 * 1000;
+
 export async function getActiveGame(coupleId: string): Promise<ActiveGame> {
   const st = await prisma.coupleUsState.findUnique({ where: { coupleId } });
   if (!st?.gameSessionId || !st.gameSessionStatus) {
     return { session: null };
   }
   const ageMs = st.gameSessionAt ? Date.now() - new Date(st.gameSessionAt).getTime() : Number.MAX_SAFE_INTEGER;
-  if (ageMs > 24 * 60 * 60 * 1000) {
+  if (ageMs > GAME_SESSION_TTL_MS) {
     await prisma.coupleUsState.update({
       where: { coupleId },
       data: {

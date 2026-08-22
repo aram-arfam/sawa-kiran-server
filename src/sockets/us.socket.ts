@@ -1,5 +1,6 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { prisma } from '../lib/prisma';
+import { GAME_SESSION_TTL_MS } from '../services/us.service';
 import { logger } from '../utils/logger';
 import { pushToUser } from '../services/push.service';
 import { clearGameChallengeNotification, clearDateRequestNotification, updateDateRequestNotificationData } from '../services/notification.service';
@@ -786,7 +787,7 @@ export const registerUsHandlers = (io: SocketIOServer, socket: Socket): void => 
       const live =
         !!existing?.gameSessionId &&
         !!existing.gameSessionStatus &&
-        ageMs < 3 * 60 * 60 * 1000;
+        ageMs < GAME_SESSION_TTL_MS;
       const sameGame = live && existing!.gameSessionId === payload.gameId;
       const myPendingReinvite =
         live &&
@@ -867,7 +868,10 @@ export const registerUsHandlers = (io: SocketIOServer, socket: Socket): void => 
           ...(senderPhoto ? { senderPhoto } : {}),
           ...i18nData('us.game.challenge', { name: senderName, game: gameName }),
         },
-        collapseKey: 'us_game',
+        // Own bucket: with the shared 'us_game' key, a queued challenge was
+        // silently REPLACED by any later accepted/your-move push while the
+        // device was offline (FCM keeps only the last message per key).
+        collapseKey: 'us_game_challenge',
       }).catch(() => null);
     }
   });

@@ -183,9 +183,10 @@ export interface PushPayload {
 //
 // Gated (non-urgent, partner-ambient): nudges (`us_nudge` also carries date
 // request/accept/reject kinds), love taps, mood shares, "how are you feeling"
-// asks, fridge notes + acks, game challenges and game results.
-// Exempt on purpose: chat messages and match events (people expect those at any
-// hour), and the job-driven types (us_cycle, us_date_reminder, us_birthday,
+// asks, fridge notes + acks.
+// Exempt on purpose: chat messages, match events AND game challenge/result
+// (people expect those at any hour — they are direct live actions from the
+// partner), and the job-driven types (us_cycle, us_date_reminder, us_birthday,
 // us_anniversary, subscription nudges) whose jobs already gate themselves on
 // the 08:00–21:00 IST window.
 //
@@ -198,14 +199,29 @@ export const QUIET_HOURS_GATED_TYPES: ReadonlySet<string> = new Set([
   'us_ask_feeling',
   'us_fridge_note',
   'us_fridge_ack',
-  'us_game_challenge',
-  'us_game_result',
+  // Game types were gated here until 2026-08-22 — wrong call: a challenge is
+  // a live partner-to-partner action (the sender is sitting on a "waiting
+  // for {name}…" screen) and couples play at night more than any other time.
+  // The gate made invites silently vanish after 22:00 IST — reported as
+  // "notifications sometimes don't work". Games stay EXEMPT like chat.
 ]);
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 /** Phone-buzz window for gated types: 08:00 (inclusive) – 22:00 (exclusive) IST. */
 const PUSH_ALLOWED_FROM_HOUR_IST = 8;
 const PUSH_ALLOWED_UNTIL_HOUR_IST = 22;
+
+/** Log the disabled-push no-op at most once a minute — visible in prod logs
+ *  without flooding them. Every skipped send used to be perfectly silent,
+ *  which made a missing/broken FIREBASE_SERVICE_ACCOUNT_JSON look like
+ *  "notifications randomly don't work". */
+let lastDisabledLogAt = 0;
+const logDisabledSkip = (what: string): void => {
+  const now = Date.now();
+  if (now - lastDisabledLogAt < 60_000) return;
+  lastDisabledLogAt = now;
+  logger.warn(`[Push] DISABLED (no/invalid FIREBASE_SERVICE_ACCOUNT_JSON) — dropping '${what}' (logged at most once/min).`);
+};
 
 const isQuietHoursIST = (): boolean => {
   const istHour = new Date(Date.now() + IST_OFFSET_MS).getUTCHours();
@@ -242,7 +258,10 @@ export const pushToCouple = async (
   // it still works when push is disabled or a device has no token).
   void mirrorToWhatsAppCouple(coupleId, payload);
 
-  if (!enabled) return { sent: 0, failed: 0 };
+  if (!enabled) {
+    logDisabledSkip(String(payload.data?.type ?? payload.title));
+    return { sent: 0, failed: 0 };
+  }
 
   const users = await prisma.user.findMany({
     where: { coupleId, pushToken: { not: null } },
@@ -331,7 +350,10 @@ export const pushToUser = async (
   // Mirror to WhatsApp for this one user (fire-and-forget, independent of FCM).
   void mirrorToWhatsAppUser(userId, payload);
 
-  if (!enabled) return { sent: 0, failed: 0 };
+  if (!enabled) {
+    logDisabledSkip(String(payload.data?.type ?? payload.title));
+    return { sent: 0, failed: 0 };
+  }
 
   // findUnique only accepts the unique key — extra conditions like
   // pushToken: { not: null } are not valid there. Check null after fetch.

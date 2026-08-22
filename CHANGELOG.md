@@ -4,6 +4,32 @@
 
 ---
 
+## [2026-08-22] — Game pushes ungated at night, one session TTL, hour-before date reminders, push observability
+
+**Why:** Arfam: "game invite notification sometimes works, sometimes doesn't."
+Pipeline audit found three real causes. (1) `us_game_challenge`/`us_game_result`
+sat in the quiet-hours set — every invite after 22:00 IST silently dropped its
+push, exactly when couples play. (2) The challenge lock used a 3h liveness while
+`getActiveGame` used 24h: between hour 3 and 24 of a stale session the client
+pre-flight silently "joined" a dead session instead of challenging — the partner
+received nothing at all. (3) All game pushes shared `collapseKey:'us_game'`, so
+an offline device's queued challenge was overwritten by any later accepted/
+your-move push (FCM keeps one message per key).
+
+**What:** game types removed from `QUIET_HOURS_GATED_TYPES` (they are live
+partner-to-partner actions, exempt like chat); `GAME_SESSION_TTL_MS = 3h`
+exported from us.service and shared by the socket lock and `getActiveGame`;
+challenge pushes get their own `us_game_challenge` collapse bucket; the
+push-disabled no-op (missing/invalid `FIREBASE_SERVICE_ACCOUNT_JSON`) now logs
+a warn at most once/min instead of being perfectly silent.
+
+**Also — hour-before date reminders (Arfam):** `runSoonCheck` in
+eventReminderNotifier, every 10 min: plans with a time get one nudge ~an hour
+out (`us.date.reminderSoon`, 4 locales), epoch-based across the midnight edge,
+per-plan dedupe, deliberately not quiet-hours gated (it's the couple's own
+imminent plan). Day-before reminder unchanged (already existed). Both partners
+notified via couple-level row + pushToCouple. Tests 85/85.
+
 ## [2026-08-22] — Schema syncs itself on deploy (`start` runs `db:deploy`)
 
 **Why:** prod has no shell (Railway, no CLI in the team's flow), so "merge the
