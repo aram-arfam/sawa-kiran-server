@@ -4,6 +4,23 @@
 
 ---
 
+## [2026-08-22] — Quiet hours are gone: every push fires the moment it's generated
+
+**Why:** Arfam — "our notification will go when they are generated/requested."
+The 22:00–08:00 IST mute still silenced nudges, love taps, mood shares,
+feeling-asks and fridge notes/acks (games were un-muted earlier today). A
+partner sending love at 23:00 IS the product; a server-side hardcoded clock
+deciding it can wait until morning was the wrong call, and its silent drops
+read as "notifications randomly don't work".
+
+**What:** the whole mechanism deleted from push.service
+(`QUIET_HOURS_GATED_TYPES`, `isQuietHoursIST`, `mutedByQuietHours`, both muted
+early-returns) with a tombstone comment: if quiet hours ever return they must
+be a per-user SETTING, never a server clock. The scheduled jobs
+(cycle/celebration/day-before reminder) keep their 08:00–21:00 IST windows —
+that window is when those notifications are GENERATED, not a suppression of an
+existing one. The hour-before date reminder was already window-free. 85/85.
+
 ## [2026-08-22] — Partner thread learns voice notes (+ prompt type)
 
 **Why:** the app's partner chat now runs the full couple-chat composer (voice,

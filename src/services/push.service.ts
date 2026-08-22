@@ -177,39 +177,16 @@ export interface PushPayload {
 // socket/route-driven pushes (a nudge, a mood, a game finishing at 2am) used to
 // buzz phones at any hour. Outside 08:00–22:00 IST the FCM push AND the
 // WhatsApp mirror are suppressed for the `data.type` values below. The
-// Notification row and the socket emit are written by the CALLER before it
-// pushes, so every in-app surface stays live — only the phone buzz respects
-// the night.
-//
-// Gated (non-urgent, partner-ambient): nudges (`us_nudge` also carries date
-// request/accept/reject kinds), love taps, mood shares, "how are you feeling"
-// asks, fridge notes + acks.
-// Exempt on purpose: chat messages, match events AND game challenge/result
-// (people expect those at any hour — they are direct live actions from the
-// partner), and the job-driven types (us_cycle, us_date_reminder, us_birthday,
-// us_anniversary, subscription nudges) whose jobs already gate themselves on
-// the 08:00–21:00 IST window.
-//
-// Known gap: the window is hardcoded to IST exactly like the cron jobs —
-// per-user timezones are a future improvement, deliberately not built here.
-export const QUIET_HOURS_GATED_TYPES: ReadonlySet<string> = new Set([
-  'us_nudge',
-  'us_love',
-  'us_feeling',
-  'us_ask_feeling',
-  'us_fridge_note',
-  'us_fridge_ack',
-  // Game types were gated here until 2026-08-22 — wrong call: a challenge is
-  // a live partner-to-partner action (the sender is sitting on a "waiting
-  // for {name}…" screen) and couples play at night more than any other time.
-  // The gate made invites silently vanish after 22:00 IST — reported as
-  // "notifications sometimes don't work". Games stay EXEMPT like chat.
-]);
-
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-/** Phone-buzz window for gated types: 08:00 (inclusive) – 22:00 (exclusive) IST. */
-const PUSH_ALLOWED_FROM_HOUR_IST = 8;
-const PUSH_ALLOWED_UNTIL_HOUR_IST = 22;
+// NO quiet-hours gate lives here anymore (Arfam, 2026-08-22): every push
+// fires the moment its action is generated. The old 22:00–08:00 IST mute
+// (nudges/love/feelings/fridge, and originally even game invites) made
+// user-to-user moments silently vanish at night and was reported twice as
+// "notifications sometimes don't work". If per-user quiet hours ever return,
+// they must be a USER SETTING with the suppression visible in the in-app
+// list — never a server-side hardcoded clock. The scheduled JOBS
+// (cycle/celebration/day-before reminders) keep their own 08:00–21:00 IST
+// send windows: that window is when those notifications are GENERATED, not a
+// suppression of an existing one.
 
 /** Log the disabled-push no-op at most once a minute — visible in prod logs
  *  without flooding them. Every skipped send used to be perfectly silent,
@@ -223,17 +200,6 @@ const logDisabledSkip = (what: string): void => {
   logger.warn(`[Push] DISABLED (no/invalid FIREBASE_SERVICE_ACCOUNT_JSON) — dropping '${what}' (logged at most once/min).`);
 };
 
-const isQuietHoursIST = (): boolean => {
-  const istHour = new Date(Date.now() + IST_OFFSET_MS).getUTCHours();
-  return istHour < PUSH_ALLOWED_FROM_HOUR_IST || istHour >= PUSH_ALLOWED_UNTIL_HOUR_IST;
-};
-
-/** True when this payload's phone buzz (FCM + WhatsApp) must stay silent right now. */
-const mutedByQuietHours = (payload: PushPayload): boolean => {
-  const type = typeof payload.data?.type === 'string' ? payload.data.type : '';
-  return QUIET_HOURS_GATED_TYPES.has(type) && isQuietHoursIST();
-};
-
 /**
  * Send a push notification to every registered device of a couple.
  *
@@ -245,15 +211,6 @@ export const pushToCouple = async (
   coupleId: string,
   payload: PushPayload,
 ): Promise<{ sent: number; failed: number }> => {
-  // Quiet hours: mute the phone buzz for non-urgent types at night. The in-app
-  // Notification row + socket emit were already delivered by the caller.
-  if (mutedByQuietHours(payload)) {
-    logger.info(
-      `[Push] quiet hours (IST) — muted '${String(payload.data?.type)}' push to couple ${coupleId}.`,
-    );
-    return { sent: 0, failed: 0 };
-  }
-
   // Mirror to WhatsApp for BOTH partners (fire-and-forget, independent of FCM so
   // it still works when push is disabled or a device has no token).
   void mirrorToWhatsAppCouple(coupleId, payload);
@@ -338,15 +295,6 @@ export const pushToUser = async (
   userId: string,
   payload: PushPayload,
 ): Promise<{ sent: number; failed: number }> => {
-  // Quiet hours: mute the phone buzz for non-urgent types at night. The in-app
-  // Notification row + socket emit were already delivered by the caller.
-  if (mutedByQuietHours(payload)) {
-    logger.info(
-      `[Push] quiet hours (IST) — muted '${String(payload.data?.type)}' push to user ${userId}.`,
-    );
-    return { sent: 0, failed: 0 };
-  }
-
   // Mirror to WhatsApp for this one user (fire-and-forget, independent of FCM).
   void mirrorToWhatsAppUser(userId, payload);
 
