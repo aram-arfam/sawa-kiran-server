@@ -4,6 +4,20 @@
 
 ---
 
+## [2026-08-22] — Partner thread learns voice notes (+ prompt type)
+
+**Why:** the app's partner chat now runs the full couple-chat composer (voice,
+suggestions) — the thread's transport was text-only.
+
+**What:** `us:chat:send` accepts `contentType` ('text'|'prompt'|'audio') +
+`audioDuration`; audio content must be an `s3:voice/` ref or a `data:audio`
+URI (inline fallback), plain text keeps its 1000-char cap. Persisted,
+broadcast, and echoed with both fields; `listPartnerMessages` returns them.
+Voice pushes say "sent you a voice note" (`us.chat.voice`, 4 locales) instead
+of previewing the raw ref. Upload/playback reuse the existing presigned
+`/chats/upload-url` + `/chats/media-url` unchanged (same-couple ownership
+already passes). No schema change. Tests 85/85.
+
 ## [2026-08-22] — Game pushes ungated at night, one session TTL, hour-before date reminders, push observability
 
 **Why:** Arfam: "game invite notification sometimes works, sometimes doesn't."

@@ -496,6 +496,20 @@ const T: Record<string, Entry> = {
       mr: 'ने तुम्हाला संदेश पाठवला 💬',
     },
   },
+  'us.chat.voice': {
+    title: {
+      en: '{name}',
+      hi: '{name}',
+      kn: '{name}',
+      mr: '{name}',
+    },
+    body: {
+      en: 'sent you a voice note 🎙️',
+      hi: 'ने आपको वॉइस नोट भेजा 🎙️',
+      kn: 'ನಿಮಗೆ ವಾಯ್ಸ್ ನೋಟ್ ಕಳುಹಿಸಿದ್ದಾರೆ 🎙️',
+      mr: 'ने तुम्हाला व्हॉइस नोट पाठवली 🎙️',
+    },
+  },
   'us.game.accepted': {
     title: {
       en: '{name} accepted 🎮',

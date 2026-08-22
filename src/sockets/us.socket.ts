@@ -640,10 +640,27 @@ export const registerUsHandlers = (io: SocketIOServer, socket: Socket): void => 
   // senderId = the couple's own coupleId (no match, no community — the couple
   // IS the room). Room-wide emit doubles as the sender's delivery ack.
   // Idempotent per clientMessageId (reconnect replays re-emit the saved id).
-  socket.on(SOCKET_EVENTS.US_CHAT_SEND, async (payload: { clientMessageId?: string; text?: string }) => {
+  socket.on(SOCKET_EVENTS.US_CHAT_SEND, async (payload: { clientMessageId?: string; text?: string; contentType?: string; audioDuration?: number }) => {
     if (!userId || !coupleId) return;
     const text = (payload?.text ?? '').trim();
-    if (!text || text.length > 1000) return;
+    // Voice notes ride the same pipe: content is an s3 ref (or a small inline
+    // data URI from the no-network fallback); plain text keeps its 1000 cap.
+    const contentType: 'text' | 'prompt' | 'audio' =
+      payload?.contentType === 'audio' || payload?.contentType === 'prompt'
+        ? payload.contentType
+        : 'text';
+    if (
+      contentType === 'audio' &&
+      !(text.startsWith('s3:voice/') || text.startsWith('data:audio'))
+    ) {
+      return;
+    }
+    const maxLen = contentType === 'audio' ? 1_500_000 : 1000;
+    if (!text || text.length > maxLen) return;
+    const audioDuration =
+      contentType === 'audio' && Number.isFinite(Number(payload?.audioDuration))
+        ? Math.max(0, Math.round(Number(payload?.audioDuration)))
+        : null;
     const clientMessageId =
       typeof payload?.clientMessageId === 'string' && payload.clientMessageId
         ? payload.clientMessageId.slice(0, 64)
@@ -662,6 +679,8 @@ export const registerUsHandlers = (io: SocketIOServer, socket: Socket): void => 
             senderUserId: userId,
             senderName: firstName(userName || ''),
             text,
+            contentType,
+            audioDuration,
             createdAt: new Date().toISOString(),
           });
         }
@@ -678,7 +697,8 @@ export const registerUsHandlers = (io: SocketIOServer, socket: Socket): void => 
           senderUserId: userId,
           senderName: firstName(userName || ''),
           content: text,
-          contentType: 'text',
+          contentType,
+          audioDuration,
         },
         select: { id: true, createdAt: true },
       });
@@ -697,6 +717,8 @@ export const registerUsHandlers = (io: SocketIOServer, socket: Socket): void => 
       senderUserId: userId,
       senderName: firstName(userName || ''),
       text,
+      contentType,
+      audioDuration,
       createdAt: saved.createdAt.toISOString(),
     });
 
@@ -710,12 +732,19 @@ export const registerUsHandlers = (io: SocketIOServer, socket: Socket): void => 
           const senderName = firstName(userName || 'Your partner');
           pushToUser(partnerId, {
             title: senderName,
-            body: text.length > 120 ? `${text.slice(0, 117)}…` : text,
+            body:
+              contentType === 'audio'
+                ? renderNotif('en', 'us.chat.voice', { name: senderName }).body
+                : text.length > 120
+                ? `${text.slice(0, 117)}…`
+                : text,
             data: {
               type: 'us_partner_message',
               subtype: 'us_partner_message',
               navigate: 'PartnerChat',
-              ...i18nData('us.chat.message', { name: senderName }),
+              ...(contentType === 'audio'
+                ? i18nData('us.chat.voice', { name: senderName })
+                : i18nData('us.chat.message', { name: senderName })),
             },
             collapseKey: 'us_partner_chat',
           }).catch(() => null);
