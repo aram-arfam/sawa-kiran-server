@@ -304,6 +304,7 @@ export const completeOnboarding = async (req: Request, res: Response) => {
     select: {
       profileName: true,
       primaryPhoto: true,
+      locationCity: true,
       answers: { select: { id: true } },
     },
   });
@@ -327,6 +328,16 @@ export const completeOnboarding = async (req: Request, res: Response) => {
     // Expected but not fatal: completion without a photo doesn't bounce the
     // couple back into onboarding, it just leaves the profile photo-less.
     logger.warn(`[CoupleController] completeOnboarding for ${coupleId}: no primary photo stored`);
+  }
+  // City is mandatory in the product (Arfam: "they must fill city") and the
+  // current app enforces it client-side before this call. WARN-only here
+  // because store builds older than the mandatory-city cycle can still
+  // complete without one — a hard 400 would strand those users at the final
+  // step. FLIP TO STRICT (join the check above) once 1.0.1(8)+ is the fleet
+  // floor — tracked in workspace todo.md.
+  const hasCity = !!stored?.locationCity && stored.locationCity !== 'Unknown';
+  if (!hasCity) {
+    logger.warn(`[CoupleController] completeOnboarding for ${coupleId}: no city stored (legacy build?)`);
   }
 
   // 4. The ONE writer of isProfileComplete (also announces to the city).
