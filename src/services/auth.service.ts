@@ -3,7 +3,8 @@ import { otpService, formatPhoneE164 } from './otp.service';
 import { precheckSmsSendAllowed, maskPhone } from './abuseGuard';
 import { revokeUserAccessTokens } from './tokenDenylist';
 import { userRepository, normalizePhone } from '../repositories/user.repository';
-import { signAccessToken, signRefreshToken, verifyRefreshToken, denylistAccessToken } from '../utils/jwt';
+import { sessionRepository } from '../repositories/session.repository';
+import { signAccessToken, signRefreshToken, verifyRefreshToken, denylistAccessToken, tokenExpiryDate } from '../utils/jwt';
 import { AppError } from '../utils/AppError';
 import { prisma } from '../lib/prisma';
 import { logger } from '../utils/logger';
@@ -227,7 +228,11 @@ export class AuthService {
       coupleId,
     });
 
-    await userRepository.saveRefreshTokenHash(yourUser.id, hashToken(yourRefreshToken));
+    await sessionRepository.create(
+      yourUser.id,
+      hashToken(yourRefreshToken),
+      tokenExpiryDate(yourRefreshToken),
+    );
 
     return {
       coupleId,
@@ -245,17 +250,35 @@ export class AuthService {
    */
   async refreshAccessToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string }> {
     const payload = verifyRefreshToken(refreshToken);
+    const presentedHash = hashToken(refreshToken);
 
     const user = await userRepository.findByIdWithRefreshToken(payload.userId);
-    if (!user || !user.refreshTokenHash) {
+    if (!user) {
       throw new AppError('Invalid refresh token', 401, 'INVALID_REFRESH_TOKEN');
     }
 
-    // Constant-time compare of the stored vs presented refresh-token hash.
-    const presented = Buffer.from(hashToken(refreshToken), 'utf8');
-    const stored = Buffer.from(user.refreshTokenHash, 'utf8');
-    if (presented.length !== stored.length || !crypto.timingSafeEqual(presented, stored)) {
-      throw new AppError('Refresh token mismatch', 401, 'INVALID_REFRESH_TOKEN');
+    // Multi-session: each device owns a RefreshSession row, so two devices on
+    // one account no longer rotate each other's token away (the old single
+    // refreshTokenHash slot logged the second device out on every refresh).
+    const session = await sessionRepository.findByHash(presentedHash);
+
+    let legacyMatch = false;
+    if (!session) {
+      // Legacy fallback: tokens issued before the sessions table shipped live
+      // in the single slot. Constant-time compare, then migrate the session
+      // into the table via the rotation below.
+      if (!user.refreshTokenHash) {
+        throw new AppError('Invalid refresh token', 401, 'INVALID_REFRESH_TOKEN');
+      }
+      const presented = Buffer.from(presentedHash, 'utf8');
+      const stored = Buffer.from(user.refreshTokenHash, 'utf8');
+      if (presented.length !== stored.length || !crypto.timingSafeEqual(presented, stored)) {
+        throw new AppError('Refresh token mismatch', 401, 'INVALID_REFRESH_TOKEN');
+      }
+      legacyMatch = true;
+    } else if (session.expiresAt < new Date() || session.userId !== user.id) {
+      await sessionRepository.rotate(presentedHash, user.id, presentedHash, new Date(0)).catch(() => {});
+      throw new AppError('Invalid refresh token', 401, 'INVALID_REFRESH_TOKEN');
     }
 
     const resolvedCoupleId = payload.coupleId ?? user.coupleId ?? undefined;
@@ -273,7 +296,19 @@ export class AuthService {
       coupleMongoId: payload.coupleMongoId,
       coupleId: resolvedCoupleId,
     });
-    await userRepository.saveRefreshTokenHash(user.id, hashToken(newRefreshToken));
+    await sessionRepository.rotate(
+      presentedHash,
+      user.id,
+      hashToken(newRefreshToken),
+      tokenExpiryDate(newRefreshToken),
+    );
+    if (legacyMatch) {
+      // The single slot is spent — clear it so the old token can't replay.
+      await userRepository.clearRefreshToken(user.id);
+    }
+
+    // Opportunistic, off the hot path: expired rows don't accumulate.
+    void sessionRepository.pruneExpired().catch(() => {});
 
     return { accessToken, refreshToken: newRefreshToken };
   }
@@ -295,6 +330,7 @@ export class AuthService {
   async logout(userId: string, jti?: string, accessTokenExp?: number): Promise<void> {
     await Promise.all([
       userRepository.clearRefreshToken(userId),
+      sessionRepository.deleteAllForUser(userId),
       revokeUserAccessTokens(userId),
       denylistAccessToken(jti, accessTokenExp),
     ]);
@@ -343,7 +379,7 @@ export class AuthService {
         coupleId: user.coupleId || undefined,
       });
 
-      await userRepository.saveRefreshTokenHash(user.id, hashToken(refreshToken));
+      await sessionRepository.create(user.id, hashToken(refreshToken), tokenExpiryDate(refreshToken));
 
       return {
         coupleId: user.coupleId || '',
@@ -469,7 +505,7 @@ export class AuthService {
       coupleId,
     });
 
-    await userRepository.saveRefreshTokenHash(user.id, hashToken(refreshToken));
+    await sessionRepository.create(user.id, hashToken(refreshToken), tokenExpiryDate(refreshToken));
 
     // Same shape as GET /couples/me (formatted, sanitized) — the raw Prisma row
     // used to go out here, so login and profile-fetch returned two different
