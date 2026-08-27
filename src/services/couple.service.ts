@@ -238,14 +238,15 @@ export class CoupleService {
     // However, I used Json for answers if I remember correctly.
     // Let's check schema.prisma
     
-    const wasIncomplete = await prisma.couple.findUnique({
-      where: { coupleId },
-      select: { isProfileComplete: true, locationCity: true, profileName: true },
-    });
-
+    // Answers only. This method used to ALSO flip isProfileComplete — so the
+    // mid-onboarding best-effort save from the QnA screen marked the couple
+    // "complete" before the user ever reached the agreements step (and a
+    // mid-flow partner login went straight to Home with a half profile).
+    // Completion now has exactly ONE writer: markProfileComplete, called by
+    // the /onboarding/complete endpoint (couple-identity audit, 2026-08-27).
     await prisma.couple.update({
       where: { coupleId },
-      data: { 
+      data: {
           answers: {
               deleteMany: {},
               create: answers.map((a: any) => ({
@@ -253,54 +254,19 @@ export class CoupleService {
                   selectedOptionIds: a.selectedOptionIds
               }))
           },
-          isProfileComplete: true 
       }
     });
-
-    // ─── Notify nearby couples that a new couple just joined their city ───
-    // Only fires on the FIRST time onboarding completes (not on re-saves)
-    // and only if we know what city they're in.
-    if (wasIncomplete && !wasIncomplete.isProfileComplete && wasIncomplete.locationCity) {
-      this.notifyNearbyCouples(
-        coupleId,
-        wasIncomplete.locationCity,
-        wasIncomplete.profileName || 'A new couple',
-      ).catch((err) => {
-        logger.warn(`[CoupleService] notifyNearbyCouples failed: ${err.message}`);
-      });
-    }
 
     // ─── AI BIO GENERATION (BACKGROUND) ─────────────────────────────────────
     (async () => {
       try {
-        const questionMap: Record<string, string> = {
-          q1: 'Life Stage', q2: 'Couple Personality', q3: 'Favorite Activities',
-          q4: 'Meeting Frequency', q5: 'What makes a good match', q6: 'Things to avoid',
-        };
-        const optionLabelMap: Record<string, string> = {
-      // Current client option ids (QuestionScreen drifted from the legacy set;
-      // unmapped ids leaked raw slugs like "q4-similar" into the AI bio prompt):
-      'q2-yes': "The 'yes' couple",
-      'q3-dinner': 'Dinner at home',
-      'q4-similar': 'Similar rhythms',
-      'q4-balanced': 'A balanced mix',
-      'q4-diverse': 'Wide-ranging tastes',
-          'q1-career': 'Building careers', 'q1-family': 'Family first', 'q1-settled': 'Newly settled', 'q1-living': 'Living it up',
-          'q1-growing': 'Growing together', 'q1-adventure': 'Always exploring',
-          'q2-hosts': "The Hosts", 'q2-yes-couple': "The 'yes' couple", 'q2-planners': 'The Planners', 'q2-explorers': 'The Explorers',
-          'q3-dinners-home': 'Dinners at home', 'q3-restaurants': 'Exploring new restaurants', 'q3-outdoor': 'Outdoor activities/nature',
-          'q3-cultural': 'Cultural events/museums', 'q3-drinks': 'Casual drinks', 'q3-trips': 'Weekend trips/travel',
-          'q4-once-month': 'Meeting once a month', 'q4-twice-month': 'Meeting twice a month', 'q4-once-week': 'Meeting once a week', 'q4-when-fits': 'Meeting whenever it fits',
-          'q5-similar-stage': 'Matches in a similar life stage', 'q5-shared-interests': 'Shared interests', 'q5-small-groups': 'Small group settings',
-          'q5-structured-plans': 'Structured plans', 'q5-clear-boundaries': 'Clear boundaries', 'q5-weekend-availability': 'Weekend availability',
-          'q6-late-night': 'Avoiding late-night plans', 'q6-large-groups': 'Avoiding very large groups', 'q6-alcohol-centric': 'Avoiding alcohol-centric meetups',
-          'q6-last-minute': 'Avoiding last-minute/spontaneous plans',
-        };
-
-        const qaData = answers.map((a: any) => ({
-          question: questionMap[a.questionId] || 'About us',
-          answers: a.selectedOptionIds.map((id: string) => optionLabelMap[id] || id),
-        }));
+        // Shared label maps (constants/onboardingLabels) — this used to carry
+        // its own drifting copy of the id→label tables (RULES §7 DRY).
+        const { labelAnswer } = require('../constants/onboardingLabels');
+        const qaData = answers.map((a: any) => {
+          const labeled = labelAnswer(a.questionId, a.selectedOptionIds);
+          return { question: labeled.question, answers: labeled.options };
+        });
 
         const { generateCoupleBio } = require('../utils/ai');
         const aiResponse = await generateCoupleBio(qaData);
@@ -707,6 +673,35 @@ export class CoupleService {
    * "Nearby" is currently city-level since we don't store GPS coordinates;
    * upgrade to lat/lng + radius when geolocation is added to the schema.
    */
+  /**
+   * The ONE writer of isProfileComplete. Flips the flag exactly once and
+   * announces the new couple to their city on that first flip (the announce
+   * used to live inside submitAnswers, tied to its premature flag write).
+   */
+  async markProfileComplete(coupleId: string): Promise<void> {
+    const before = await prisma.couple.findUnique({
+      where: { coupleId },
+      select: { isProfileComplete: true, locationCity: true, profileName: true },
+    });
+    if (!before) throw new AppError('Couple profile not found', 404);
+    if (before.isProfileComplete) return;
+
+    await prisma.couple.update({
+      where: { coupleId },
+      data: { isProfileComplete: true },
+    });
+
+    if (before.locationCity) {
+      this.notifyNearbyCouples(
+        coupleId,
+        before.locationCity,
+        before.profileName || 'A new couple',
+      ).catch((err) => {
+        logger.warn(`[CoupleService] notifyNearbyCouples failed: ${err.message}`);
+      });
+    }
+  }
+
   private async notifyNearbyCouples(
     newCoupleId: string,
     city: string,

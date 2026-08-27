@@ -33,10 +33,29 @@ model User {
   partnerOf2       Couple[]  @relation("Partner2")
   messages         Message[] @relation("Message_senderUser")
   coupleProfile    Couple?   @relation("CouplePartners", fields: [coupleId], references: [coupleId])
+  refreshSessions  RefreshSession[]
 
   @@index([coupleId])
   @@index([lastActiveAt])
   @@map("users")
+}
+
+// One row per live device session. Replaces the single refreshTokenHash slot
+// on User, where two devices on one account rotated each other's token away
+// and took turns being logged out (couple-identity audit, 2026-08-27). The
+// legacy column stays until every session has rotated through here once.
+model RefreshSession {
+  id         String    @id @default(cuid()) @map("_id")
+  userId     String
+  tokenHash  String    @unique
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  lastUsedAt DateTime?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_sessions")
 }
 
 model Couple {

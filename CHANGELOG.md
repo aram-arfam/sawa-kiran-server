@@ -4,6 +4,44 @@
 
 ---
 
+## [2026-08-27] — Couple identity: atomic, reconciled, observable (the auth audit lands)
+
+**Why:** two field bugs — "login errors once then works" and "profile created but login lands in
+the questionnaire" — audited end-to-end (workspace changelog links the full report). Both traced
+to one class: couple identity was never created atomically, and one critical security find rode
+along (signup verify returned the PARTNER's tokens to the caller's device).
+
+**What (5 commits `6f68dec`…`4a20064`):**
+- `fix(auth)` `6f68dec`: partner tokens removed from the verify response (the partner signs in on
+  their own device — their row is verified at signup); send-otp reuses the pending coupleId
+  instead of minting per attempt; `upsertByPhone` re-points stale coupleIds and resolves all
+  three legacy phone formats keyed by id (kills the markVerified-P2025 500); verify + login wrap
+  identity writes in one `$transaction`; login resolves the couple from partner refs first and
+  NEVER mints one (409 `COUPLE_NOT_FOUND` instead); login returns the same formatted profile
+  shape as `GET /couples/me`.
+- `fix(couples)` `a95f5ce`: `isProfileComplete` has ONE writer (`markProfileComplete`, which also
+  owns the city announce) — submitAnswers no longer flips it mid-onboarding; `/onboarding/complete`
+  verifies the DB holds real name + answers before flagging (400 `ONBOARDING_INCOMPLETE`
+  otherwise, missing photo warns); `GET /couples/me` with a coupleId-less token 401s instead of
+  500ing; completion path off `console.*` onto the logger.
+- `feat(auth)` `d346098`: multi-session refresh tokens — `RefreshSession` table (hash-only,
+  unique, 8/user cap, atomic rotation, legacy single-slot fallback that migrates on first
+  rotation). Two devices on one account no longer log each other out. Schema additive —
+  db:deploy applies it on next start.
+- `feat(ops)` `4df029f`: structured auth-funnel events (phone-hashed), loud once-a-minute alert
+  when Redis fail-open disables the OTP lockout/denylist/watermark, SMS per-phone daily cap
+  default 6 → 10 (signup burns two sends per attempt).
+- `feat(scripts)` `4a20064`: `repairCoupleIdentity.ts` — dry-run-default healer for rows the old
+  path already broke (stale pointers, null partner refs, ghosts, orphans, legacy phone formats).
+  Prod dry-run found the field bug in the flesh: 1 user with a NULL coupleId whose COMPLETE
+  couple references them, 1 couple missing partner1Id. **Run with `--apply` after deploy.**
+
+**Contract notes:** mobile never read the partner token fields (verified) — no client change
+needed. `COUPLE_NOT_FOUND`/`SESSION_INVALID`/`ONBOARDING_INCOMPLETE` are new error codes; mobile
+surfaces `error` text generically. Gates: tsc clean, jest 85/85.
+
+---
+
 ## [2026-08-22] — Quiet hours are gone: every push fires the moment it's generated
 
 **Why:** Arfam — "our notification will go when they are generated/requested."

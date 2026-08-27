@@ -45,6 +45,14 @@ export const signRefreshToken = (payload: SignablePayload): string => {
   );
 };
 
+/** Expiry of a signed token as a Date (for RefreshSession rows). Falls back
+ *  to +90d if the claim is somehow absent so a session row always expires. */
+export const tokenExpiryDate = (token: string): Date => {
+  const decoded = jwt.decode(token) as { exp?: number } | null;
+  if (decoded?.exp) return new Date(decoded.exp * 1000);
+  return new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+};
+
 export const verifyAccessToken = (token: string): JwtPayload => {
   try {
     const payload = jwt.verify(token, env.JWT_ACCESS_SECRET, {

@@ -5,7 +5,9 @@ import { prisma } from '../lib/prisma';
 import { sendSuccess } from '../utils/response';
 import { validate } from '../middleware/validate';
 import { AppError } from '../utils/AppError';
+import { logger } from '../utils/logger';
 import { isEnforced } from '../config/subscription';
+import { logAuthEvent } from '../utils/authEvents';
 import { ageFromDobString } from '../utils/age';
 import {
   getCachedCoupleProfile,
@@ -268,52 +270,90 @@ export const completeOnboarding = async (req: Request, res: Response) => {
   const { userId, coupleId } = req.user!;
   const data = req.body as z.infer<typeof CompleteOnboardingSchema>;
 
-  console.log(`[CoupleController] completeOnboarding START for coupleId: ${coupleId}`);
+  logger.info(`[CoupleController] completeOnboarding START for coupleId: ${coupleId}`);
 
-  try {
-    // 1. Only run setupProfile when names are present in the payload.
-    //    Each onboarding step already saves to the server immediately, so on a
-    //    reinstall the profile data lives in the DB — we just skip re-saving it.
-    const hasProfileData = data.yourName && data.yourName.trim().length > 0
-      && data.partnerName && data.partnerName.trim().length > 0;
+  // 1. Only run setupProfile when names are present in the payload.
+  //    Each onboarding step already saves to the server immediately, so on a
+  //    reinstall the profile data lives in the DB — we just skip re-saving it.
+  const hasProfileData = data.yourName && data.yourName.trim().length > 0
+    && data.partnerName && data.partnerName.trim().length > 0;
 
-    if (hasProfileData) {
-      await coupleService.setupProfile(userId, coupleId!, data as any);
-    } else {
-      console.log(`[CoupleController] completeOnboarding: no profile names in payload — skipping setupProfile (reinstall scenario)`);
-    }
-
-    // 2. Parallelize photo and answer saves (both are idempotent / additive).
-    const tasks: Promise<any>[] = [];
-    if (data.primaryPhotoBase64 || (data.secondaryPhotosBase64 && data.secondaryPhotosBase64.length > 0)) {
-      tasks.push(coupleService.uploadPhotos(coupleId!, data));
-    }
-    if (data.answers && data.answers.length > 0) {
-      tasks.push(coupleService.submitAnswers(coupleId!, data.answers));
-    }
-    if (tasks.length > 0) await Promise.all(tasks);
-
-    // 3. Always mark the profile as complete — this is the authoritative step.
-    await prisma.couple.update({
-      where: { coupleId: coupleId! },
-      data: { isProfileComplete: true },
-    });
-    await invalidateCoupleProfile(coupleId!);
-
-    // 4. Fetch the final profile to return to the client.
-    const couple = await coupleService.getCouple(coupleId!);
-
-    console.log(`[CoupleController] completeOnboarding SUCCESS for coupleId: ${coupleId}`);
-    sendSuccess({ 
-      res, 
-      statusCode: 200, 
-      message: 'All Onboarding data completed successfully',
-      data: { couple } 
-    });
-  } catch (err) {
-    console.error(`[CoupleController] completeOnboarding FAILED:`, err);
-    throw err;
+  if (hasProfileData) {
+    await coupleService.setupProfile(userId, coupleId!, data as any);
+  } else {
+    logger.info(`[CoupleController] completeOnboarding: no profile names in payload — skipping setupProfile (reinstall scenario)`);
   }
+
+  // 2. Parallelize photo and answer saves (both are idempotent / additive).
+  const tasks: Promise<any>[] = [];
+  if (data.primaryPhotoBase64 || (data.secondaryPhotosBase64 && data.secondaryPhotosBase64.length > 0)) {
+    tasks.push(coupleService.uploadPhotos(coupleId!, data));
+  }
+  if (data.answers && data.answers.length > 0) {
+    tasks.push(coupleService.submitAnswers(coupleId!, data.answers));
+  }
+  if (tasks.length > 0) await Promise.all(tasks);
+
+  // 3. Verify the DB really holds the essentials BEFORE flagging complete.
+  //    "Complete" used to be written unconditionally — a mid-sequence failure
+  //    (or a payload missing answers) produced couples marked complete with
+  //    nothing behind them, or half-saved profiles that bounced back into the
+  //    questionnaire on every login (couple-identity audit, 2026-08-27).
+  const stored = await prisma.couple.findUnique({
+    where: { coupleId: coupleId! },
+    select: {
+      profileName: true,
+      primaryPhoto: true,
+      locationCity: true,
+      answers: { select: { id: true } },
+    },
+  });
+  const hasRealName =
+    !!stored?.profileName &&
+    stored.profileName !== 'Sawa Couple' &&
+    stored.profileName.trim().length > 0;
+  const hasAnswers = (stored?.answers?.length ?? 0) > 0;
+  if (!hasRealName || !hasAnswers) {
+    logger.warn(
+      `[CoupleController] completeOnboarding REFUSED for ${coupleId}: name=${hasRealName} answers=${hasAnswers}`,
+    );
+    logAuthEvent('onboarding.refused_incomplete', { coupleId });
+    throw new AppError(
+      'A couple of steps are still missing — please finish your profile.',
+      400,
+      'ONBOARDING_INCOMPLETE',
+    );
+  }
+  if (!stored?.primaryPhoto) {
+    // Expected but not fatal: completion without a photo doesn't bounce the
+    // couple back into onboarding, it just leaves the profile photo-less.
+    logger.warn(`[CoupleController] completeOnboarding for ${coupleId}: no primary photo stored`);
+  }
+  // City is mandatory in the product (Arfam: "they must fill city") and the
+  // current app enforces it client-side before this call. WARN-only here
+  // because store builds older than the mandatory-city cycle can still
+  // complete without one — a hard 400 would strand those users at the final
+  // step. FLIP TO STRICT (join the check above) once 1.0.1(8)+ is the fleet
+  // floor — tracked in workspace todo.md.
+  const hasCity = !!stored?.locationCity && stored.locationCity !== 'Unknown';
+  if (!hasCity) {
+    logger.warn(`[CoupleController] completeOnboarding for ${coupleId}: no city stored (legacy build?)`);
+  }
+
+  // 4. The ONE writer of isProfileComplete (also announces to the city).
+  await coupleService.markProfileComplete(coupleId!);
+  await invalidateCoupleProfile(coupleId!);
+
+  // 5. Fetch the final profile to return to the client.
+  const couple = await coupleService.getCouple(coupleId!);
+
+  logAuthEvent('onboarding.completed', { coupleId });
+  sendSuccess({
+    res,
+    statusCode: 200,
+    message: 'All Onboarding data completed successfully',
+    data: { couple }
+  });
 };
 
 export const createCouple = async (_req: Request, _res: Response) => {
@@ -322,6 +362,13 @@ export const createCouple = async (_req: Request, _res: Response) => {
 
 export const getMyCouple = async (req: Request, res: Response) => {
   const { coupleId, userId } = req.user!;
+
+  // A token without a coupleId used to reach prisma with `undefined` and blow
+  // up as a raw 500. It means the session predates the identity repair — an
+  // honest 401 sends the app through login, where the resolver fixes the row.
+  if (!coupleId) {
+    throw new AppError('Session incomplete — please log in again.', 401, 'SESSION_INVALID');
+  }
 
   // Serve from cache when available (invalidated by updateMyCouple, uploadPhotos, etc.)
   const cached = await getCachedCoupleProfile(coupleId!);
