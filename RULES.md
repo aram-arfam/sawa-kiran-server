@@ -1,7 +1,7 @@
 # SAWA Backend — Rules & Conventions
 
 > **Always read this file before making any changes to the backend.**
-> Last verified: 2026-08-20 (night) against `arfam-fix`. **Living document**:
+> Last verified: 2026-08-27 against `arfam-fix`. **Living document**:
 > any commit that makes a line here false must update that line in the same
 > commit and bump this stamp.
 >
@@ -75,8 +75,10 @@
   and `JWT_REFRESH_EXPIRES_IN` (default `90d`) in `src/config/env.ts`.
   Changing them is a product/security decision that goes through `PLAN.md`,
   not a silent edit.
-- **Refresh tokens are stored hashed** and compared constant-time
-  (`src/services/auth.service.ts`). Never store or log a raw token.
+- **Refresh tokens are stored hashed, one session row per device**
+  (`RefreshSession` table via `src/repositories/session.repository.ts`;
+  legacy single-slot tokens compare constant-time and migrate on first
+  rotation). Never store or log a raw token.
 - Admin credentials hash with bcrypt (cost 10 today, `bootstrapAdmin.ts`);
   raise to 12 on the next commit that touches admin auth.
 - Every protected route uses the `authenticate` middleware. Identity comes
