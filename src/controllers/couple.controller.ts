@@ -7,6 +7,7 @@ import { validate } from '../middleware/validate';
 import { AppError } from '../utils/AppError';
 import { logger } from '../utils/logger';
 import { isEnforced } from '../config/subscription';
+import { logAuthEvent } from '../utils/authEvents';
 import { ageFromDobString } from '../utils/age';
 import {
   getCachedCoupleProfile,
@@ -315,6 +316,7 @@ export const completeOnboarding = async (req: Request, res: Response) => {
     logger.warn(
       `[CoupleController] completeOnboarding REFUSED for ${coupleId}: name=${hasRealName} answers=${hasAnswers}`,
     );
+    logAuthEvent('onboarding.refused_incomplete', { coupleId });
     throw new AppError(
       'A couple of steps are still missing — please finish your profile.',
       400,
@@ -334,7 +336,7 @@ export const completeOnboarding = async (req: Request, res: Response) => {
   // 5. Fetch the final profile to return to the client.
   const couple = await coupleService.getCouple(coupleId!);
 
-  logger.info(`[CoupleController] completeOnboarding SUCCESS for coupleId: ${coupleId}`);
+  logAuthEvent('onboarding.completed', { coupleId });
   sendSuccess({
     res,
     statusCode: 200,

@@ -87,8 +87,24 @@ export async function cacheGet(key: string): Promise<string | null> {
     return await redis.get(key);
   } catch (err: any) {
     logger.warn(`[cache] get(${key}) failed:`, err?.message);
+    alertFailOpen();
     return localGet(key);
   }
+}
+
+// Redis being down doesn't just slow reads — it silently disables the
+// OTP brute-force lockout, the token denylist and the logout watermark
+// (all deliberately fail-open). That state must be LOUD: one error-level
+// line per minute while the outage lasts, so ops sees it instead of the
+// guards quietly vanishing (couple-identity audit, medium finding).
+let _lastFailOpenAlert = 0;
+function alertFailOpen(): void {
+  const now = Date.now();
+  if (now - _lastFailOpenAlert < 60_000) return;
+  _lastFailOpenAlert = now;
+  logger.error(
+    '[cache] Redis unavailable — OTP lockout, token denylist and logout watermark are FAIL-OPEN until it returns',
+  );
 }
 
 export async function cacheSet(key: string, value: string, ttlSeconds: number): Promise<void> {

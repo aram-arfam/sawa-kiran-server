@@ -70,8 +70,10 @@ const envSchema = z.object({
   // pumping targets foreign premium-rate ranges.
   SMS_ALLOWED_PREFIXES: z.string().default('+91'),
   // Daily caps (UTC day), each its own Redis counter:
-  //  - per destination phone: the legit ceiling for OTP retry pain;
-  SMS_PHONE_DAILY_CAP: z.string().default('6').transform(Number),
+  //  - per destination phone: the legit ceiling for OTP retry pain. Signup
+  //    burns TWO sends per attempt (one per partner number), so 6 allowed only
+  //    three attempts before a hard 429 until UTC midnight — 10 gives five.
+  SMS_PHONE_DAILY_CAP: z.string().default('10').transform(Number),
   //  - per 8-digit E.164 prefix (one 10k-number block): catches
   //    sequential-range pumping that stays under the per-phone cap;
   SMS_PREFIX_DAILY_CAP: z.string().default('30').transform(Number),

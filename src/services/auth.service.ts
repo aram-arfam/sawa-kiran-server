@@ -9,6 +9,7 @@ import { AppError } from '../utils/AppError';
 import { prisma } from '../lib/prisma';
 import { logger } from '../utils/logger';
 import { TokenPair } from '../types/index';
+import { logAuthEvent } from '../utils/authEvents';
 import { env } from '../config/env';
 
 /** Set of phone numbers (with country code) that skip OTP — for test / demo accounts */
@@ -83,6 +84,7 @@ export class AuthService {
       (existingYours && existingYours.isPhoneVerified) ||
       (existingPartner && existingPartner.isPhoneVerified)
     ) {
+      logAuthEvent('signup.blocked_exists', { phone: yourPhone });
       throw new AppError(
         'An account already exists for one of these numbers. Please sign in instead.',
         400,
@@ -128,7 +130,7 @@ export class AuthService {
       otpService.generateAndStore(partnerPhone, coupleId, partnerCodeMsg, true, ip),
     ]);
 
-    logger.info(`[AuthService] OTPs issued for entity: ${coupleId}`);
+    logAuthEvent('signup.otp_sent', { phone: yourPhone, coupleId });
     return { coupleId };
   }
 
@@ -161,9 +163,11 @@ export class AuthService {
     ]);
 
     if (!yourResult.valid) {
+      logAuthEvent('signup.invalid_otp', { phone: yourPhone });
       throw new AppError('Your OTP is invalid or expired', 400, 'INVALID_OTP');
     }
     if (!partnerResult.valid) {
+      logAuthEvent('signup.invalid_otp', { phone: partnerPhone, detail: 'partner' });
       throw new AppError("Partner's OTP is invalid or expired", 400, 'INVALID_PARTNER_OTP');
     }
 
@@ -233,6 +237,8 @@ export class AuthService {
       hashToken(yourRefreshToken),
       tokenExpiryDate(yourRefreshToken),
     );
+
+    logAuthEvent('signup.verified', { phone: yourPhone, coupleId });
 
     return {
       coupleId,
@@ -351,6 +357,7 @@ export class AuthService {
   }> {
     const user = await userRepository.findByPhone(phone);
     if (!user) {
+      logAuthEvent('login.user_not_found', { phone });
       throw new AppError('No account found with this number.', 404, 'USER_NOT_FOUND');
     }
 
@@ -358,7 +365,7 @@ export class AuthService {
 
     // ── Bypass: issue tokens immediately, no OTP needed ──────────────────────
     if (getBypassPhones().has(normalizePhone(phone))) {
-      logger.info(`[AuthService] Bypass login for ${maskPhone(phone)}`);
+      logAuthEvent('login.bypass', { phone, coupleId: user.coupleId });
 
       const couple = user.coupleId
         ? await prisma.couple.upsert({
@@ -411,6 +418,7 @@ export class AuthService {
     // keepValidPrevious=true — don't wipe a still-valid code the user may already
     // have received; avoids "Invalid or expired OTP" when an earlier code is used.
     await otpService.generateAndStore(phone, resolvedCoupleId || '', undefined, true, ip);
+    logAuthEvent('login.otp_sent', { phone, coupleId: resolvedCoupleId });
     return { coupleId: resolvedCoupleId || '' };
   }
 
@@ -436,6 +444,7 @@ export class AuthService {
     // Only check OTP validity — do NOT gate on coupleId here, since accounts
     // registered before coupleId was reliably stored may have an empty coupleId.
     if (!result.valid) {
+      logAuthEvent('login.invalid_otp', { phone });
       throw new AppError('Invalid or expired OTP', 400, 'INVALID_OTP');
     }
     if (!user) {
@@ -462,6 +471,7 @@ export class AuthService {
     if (!coupleId) {
       // A verified user with no couple anywhere is broken data, not a flow —
       // fail loudly instead of manufacturing an empty identity.
+      logAuthEvent('login.couple_not_found', { phone });
       throw new AppError(
         'We could not find your couple profile. Please register again or contact support.',
         409,
@@ -506,6 +516,8 @@ export class AuthService {
     });
 
     await sessionRepository.create(user.id, hashToken(refreshToken), tokenExpiryDate(refreshToken));
+
+    logAuthEvent('login.verified', { phone, coupleId });
 
     // Same shape as GET /couples/me (formatted, sanitized) — the raw Prisma row
     // used to go out here, so login and profile-fetch returned two different
