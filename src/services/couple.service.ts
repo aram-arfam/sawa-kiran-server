@@ -238,14 +238,15 @@ export class CoupleService {
     // However, I used Json for answers if I remember correctly.
     // Let's check schema.prisma
     
-    const wasIncomplete = await prisma.couple.findUnique({
-      where: { coupleId },
-      select: { isProfileComplete: true, locationCity: true, profileName: true },
-    });
-
+    // Answers only. This method used to ALSO flip isProfileComplete — so the
+    // mid-onboarding best-effort save from the QnA screen marked the couple
+    // "complete" before the user ever reached the agreements step (and a
+    // mid-flow partner login went straight to Home with a half profile).
+    // Completion now has exactly ONE writer: markProfileComplete, called by
+    // the /onboarding/complete endpoint (couple-identity audit, 2026-08-27).
     await prisma.couple.update({
       where: { coupleId },
-      data: { 
+      data: {
           answers: {
               deleteMany: {},
               create: answers.map((a: any) => ({
@@ -253,22 +254,8 @@ export class CoupleService {
                   selectedOptionIds: a.selectedOptionIds
               }))
           },
-          isProfileComplete: true 
       }
     });
-
-    // ─── Notify nearby couples that a new couple just joined their city ───
-    // Only fires on the FIRST time onboarding completes (not on re-saves)
-    // and only if we know what city they're in.
-    if (wasIncomplete && !wasIncomplete.isProfileComplete && wasIncomplete.locationCity) {
-      this.notifyNearbyCouples(
-        coupleId,
-        wasIncomplete.locationCity,
-        wasIncomplete.profileName || 'A new couple',
-      ).catch((err) => {
-        logger.warn(`[CoupleService] notifyNearbyCouples failed: ${err.message}`);
-      });
-    }
 
     // ─── AI BIO GENERATION (BACKGROUND) ─────────────────────────────────────
     (async () => {
@@ -707,6 +694,35 @@ export class CoupleService {
    * "Nearby" is currently city-level since we don't store GPS coordinates;
    * upgrade to lat/lng + radius when geolocation is added to the schema.
    */
+  /**
+   * The ONE writer of isProfileComplete. Flips the flag exactly once and
+   * announces the new couple to their city on that first flip (the announce
+   * used to live inside submitAnswers, tied to its premature flag write).
+   */
+  async markProfileComplete(coupleId: string): Promise<void> {
+    const before = await prisma.couple.findUnique({
+      where: { coupleId },
+      select: { isProfileComplete: true, locationCity: true, profileName: true },
+    });
+    if (!before) throw new AppError('Couple profile not found', 404);
+    if (before.isProfileComplete) return;
+
+    await prisma.couple.update({
+      where: { coupleId },
+      data: { isProfileComplete: true },
+    });
+
+    if (before.locationCity) {
+      this.notifyNearbyCouples(
+        coupleId,
+        before.locationCity,
+        before.profileName || 'A new couple',
+      ).catch((err) => {
+        logger.warn(`[CoupleService] notifyNearbyCouples failed: ${err.message}`);
+      });
+    }
+  }
+
   private async notifyNearbyCouples(
     newCoupleId: string,
     city: string,
