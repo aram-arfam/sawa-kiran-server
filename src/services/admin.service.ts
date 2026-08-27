@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma';
+import { labelAnswer } from '../constants/onboardingLabels';
 import { invalidateBanCache } from '../middleware/authenticate';
 import { emitRealtimeNotification } from '../utils/realtime';
 import { i18nData } from '../i18n/notif';
@@ -84,25 +85,6 @@ export class AdminService {
   }
 
   async getUsers(token?: string) {
-    const questionMap: Record<string, string> = {
-      q1: 'Life Stage', q2: 'Couple Personality', q3: 'Favorite Activities',
-      q4: 'Meeting Frequency', q5: 'What makes a good match', q6: 'Things to avoid',
-    };
-    const optionLabelMap: Record<string, string> = {
-      'q1-career': 'Building careers', 'q1-family': 'Family first', 'q1-settled': 'Newly settled', 'q1-living': 'Living it up',
-      'q1-growing': 'Growing together', 'q1-adventure': 'Always exploring',
-      'q2-hosts': "The Hosts", 'q2-yes-couple': "The 'yes' couple", 'q2-planners': 'The Planners', 'q2-explorers': 'The Explorers',
-      'q3-dinners-home': 'Dinners at home', 'q3-restaurants': 'Exploring new restaurants', 'q3-outdoor': 'Outdoor activities/nature',
-      'q3-cultural': 'Cultural events/museums', 'q3-drinks': 'Casual drinks', 'q3-trips': 'Weekend trips/travel',
-      'q4-once-month': 'Meeting once a month', 'q4-twice-month': 'Meeting twice a month', 'q4-once-week': 'Meeting once a week', 'q4-when-fits': 'Meeting whenever it fits',
-      'q5-similar-stage': 'Matches in a similar life stage', 'q5-shared-interests': 'Shared interests', 'q5-small-groups': 'Small group settings',
-      'q5-structured-plans': 'Structured plans', 'q5-clear-boundaries': 'Clear boundaries', 'q5-weekend-availability': 'Weekend availability',
-      'q6-late-night': 'Avoiding late-night plans', 'q6-large-groups': 'Avoiding very large groups', 'q6-alcohol-centric': 'Avoiding alcohol-centric meetups',
-      'q6-last-minute': 'Avoiding last-minute/spontaneous plans',
-    };
-
-    const dummyCities = ['Chennai', 'Goa', 'Mumbai', 'Delhi', 'Bangalore', 'Pune'];
-
     const users = await prisma.user.findMany({
       orderBy: { createdAt: 'desc' },
       include: { 
@@ -112,7 +94,7 @@ export class AdminService {
       },
     });
 
-    const mapped = users.map((u, idx) => {
+    const mapped = users.map((u) => {
       // Status hierarchy: banned > unverified > inactive (no recent activity) > active.
       let status: 'banned' | 'inactive' | 'active' = 'active';
       if (u.coupleProfile?.bannedAt) status = 'banned';
@@ -130,9 +112,12 @@ export class AdminService {
         id: u.id,
         name: realName || u.phone || 'Unknown',
         phone: u.phone,
+        // Real city or empty — the old fallback assigned a FAKE city from a
+        // round-robin list, and the assignment SHIFTED as rows were added
+        // (admin-details audit: "the details are not correct", literally).
         city: (u.coupleProfile?.locationCity && u.coupleProfile?.locationCity !== 'Unknown')
           ? u.coupleProfile.locationCity
-          : dummyCities[idx % dummyCities.length],
+          : '',
         status,
         joinedAt: u.createdAt,
         lastActiveAt: u.lastActiveAt,
@@ -144,10 +129,7 @@ export class AdminService {
           bio: u.coupleProfile.bio,
           primaryPhoto: imageRef('couple', u.coupleId, u.coupleProfile.primaryPhoto, token),
           relationshipStatus: u.coupleProfile.relationshipStatus,
-          answers: u.coupleProfile.answers.map(a => ({
-            question: questionMap[a.questionId] || a.questionId,
-            options: a.selectedOptionIds.map(oid => optionLabelMap[oid] || oid)
-          }))
+          answers: u.coupleProfile.answers.map(a => labelAnswer(a.questionId, a.selectedOptionIds))
         } : null
       };
     });
@@ -159,25 +141,6 @@ export class AdminService {
   }
 
   async getCouples(token?: string) {
-    const questionMap: Record<string, string> = {
-      q1: 'Life Stage', q2: 'Couple Personality', q3: 'Favorite Activities',
-      q4: 'Meeting Frequency', q5: 'What makes a good match', q6: 'Things to avoid',
-    };
-    const optionLabelMap: Record<string, string> = {
-      'q1-career': 'Building careers', 'q1-family': 'Family first', 'q1-settled': 'Newly settled', 'q1-living': 'Living it up',
-      'q1-growing': 'Growing together', 'q1-adventure': 'Always exploring',
-      'q2-hosts': "The Hosts", 'q2-yes-couple': "The 'yes' couple", 'q2-planners': 'The Planners', 'q2-explorers': 'The Explorers',
-      'q3-dinners-home': 'Dinners at home', 'q3-restaurants': 'Exploring new restaurants', 'q3-outdoor': 'Outdoor activities/nature',
-      'q3-cultural': 'Cultural events/museums', 'q3-drinks': 'Casual drinks', 'q3-trips': 'Weekend trips/travel',
-      'q4-once-month': 'Meeting once a month', 'q4-twice-month': 'Meeting twice a month', 'q4-once-week': 'Meeting once a week', 'q4-when-fits': 'Meeting whenever it fits',
-      'q5-similar-stage': 'Matches in a similar life stage', 'q5-shared-interests': 'Shared interests', 'q5-small-groups': 'Small group settings',
-      'q5-structured-plans': 'Structured plans', 'q5-clear-boundaries': 'Clear boundaries', 'q5-weekend-availability': 'Weekend availability',
-      'q6-late-night': 'Avoiding late-night plans', 'q6-large-groups': 'Avoiding very large groups', 'q6-alcohol-centric': 'Avoiding alcohol-centric meetups',
-      'q6-last-minute': 'Avoiding last-minute/spontaneous plans',
-    };
-
-    const dummyCities = ['Chennai', 'Goa', 'Mumbai', 'Delhi', 'Bangalore', 'Pune'];
-
     const couples = await prisma.couple.findMany({
       orderBy: { createdAt: 'desc' },
       include: { 
@@ -192,7 +155,7 @@ export class AdminService {
       },
     });
 
-    const mapped = couples.map((c, idx) => {
+    const mapped = couples.map((c) => {
       // Prefer the real membership (users linked by coupleId); fall back to the
       // legacy partner1/partner2 pointers only if the membership list is empty.
       const memberUsers = (c.users && c.users.length > 0
@@ -250,11 +213,12 @@ export class AdminService {
         _id: c.coupleId,
         id: c.coupleId,
         pairName,
-        city: (c.locationCity && c.locationCity !== 'Unknown')
-          ? c.locationCity
-          : dummyCities[idx % dummyCities.length],
-        compatibilityScore: Math.floor(Math.random() * 30) + 70,
-        streakDays: 0,
+        // Real city or empty; the fabricated metrics are gone — the panel
+        // showed a Math.random() "compatibility" that changed on every
+        // refresh. Real, honest fields instead (admin-details audit).
+        city: (c.locationCity && c.locationCity !== 'Unknown') ? c.locationCity : '',
+        joinedAt: c.createdAt,
+        isProfileComplete: c.isProfileComplete,
         status,
         relationshipStatus: c.relationshipStatus,
         bannedAt: c.bannedAt,
@@ -267,10 +231,7 @@ export class AdminService {
           phone: u.phone,
           lastActiveAt: u.lastActiveAt,
         })),
-        answers: c.answers.map(a => ({
-          question: questionMap[a.questionId] || a.questionId,
-          options: a.selectedOptionIds.map(oid => optionLabelMap[oid] || oid)
-        }))
+        answers: c.answers.map(a => labelAnswer(a.questionId, a.selectedOptionIds))
       };
     });
 
@@ -297,13 +258,13 @@ export class AdminService {
   }
 
   async getCityDistribution() {
-    const dummyCities = ['Chennai', 'Goa', 'Mumbai', 'Delhi', 'Bangalore', 'Pune'];
+    // Honest buckets only: unknown/unset cities count under "Not set" instead
+    // of being sprayed across a fake round-robin city list — the old chart
+    // reported users in cities nobody ever entered (admin-details audit).
+    const NOT_SET = 'Not set';
     const distribution: Record<string, { city: string; users: number; couples: number }> = {};
-    
-    // Default dummy distribution if DB is empty
-    dummyCities.forEach(city => {
-      distribution[city] = { city, users: 0, couples: 0 };
-    });
+    const bucket = (raw: string | null | undefined): string =>
+      raw && raw !== 'Unknown' ? raw : NOT_SET;
 
     // Only the city strings — the old include/no-select loaded every full
     // user + couple row (photos, bios, hashes) into memory per dashboard hit.
@@ -314,16 +275,14 @@ export class AdminService {
       prisma.couple.findMany({ select: { locationCity: true } }),
     ]);
 
-    users.forEach((u, idx) => {
-      const dbCity = u.coupleProfile?.locationCity;
-      const city = (dbCity && dbCity !== 'Unknown') ? dbCity : dummyCities[idx % dummyCities.length];
+    users.forEach((u) => {
+      const city = bucket(u.coupleProfile?.locationCity);
       if (!distribution[city]) distribution[city] = { city, users: 0, couples: 0 };
       distribution[city].users++;
     });
 
-    couples.forEach((c, idx) => {
-      const dbCity = c.locationCity;
-      const city = (dbCity && dbCity !== 'Unknown') ? dbCity : dummyCities[idx % dummyCities.length];
+    couples.forEach((c) => {
+      const city = bucket(c.locationCity);
       if (!distribution[city]) distribution[city] = { city, users: 0, couples: 0 };
       distribution[city].couples++;
     });
