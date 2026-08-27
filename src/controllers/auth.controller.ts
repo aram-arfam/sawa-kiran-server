@@ -122,9 +122,11 @@ export const verifyOtp = async (req: Request, res: Response): Promise<void> => {
       coupleId: result.coupleId,
       accessToken: result.yourToken.accessToken,
       refreshToken: result.yourToken.refreshToken,
-      // Partner tokens returned so the partner device can also log in
-      partnerAccessToken: result.partnerToken.accessToken,
-      partnerRefreshToken: result.partnerToken.refreshToken,
+      // The partner's tokens are DELIBERATELY not here: returning them handed
+      // full credentials for another person's account to whoever typed the two
+      // numbers (couple-identity audit, critical finding). The partner signs in
+      // on their own device via login OTP — their row is already verified.
+      // Contract-safe: the mobile app never read the partner token fields.
       yourUser: result.yourUser,
     },
   });

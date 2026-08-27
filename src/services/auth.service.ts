@@ -93,7 +93,14 @@ export class AuthService {
     await assertNotBanned(existingYours?.coupleId);
     await assertNotBanned(existingPartner?.coupleId);
 
-    const coupleId = crypto.randomUUID();
+    // Reuse the pending attempt's coupleId instead of minting a fresh UUID per
+    // call. Minting per-attempt was the root of the couple-identity audit's
+    // worst class: every abandoned "Send Code" left an orphan couple, and the
+    // OTP tokens then disagreed with the (never re-pointed) user rows about
+    // which couple the person belongs to. Preference order: your pending row,
+    // then the partner's — upsertByPhone re-points whichever row disagrees.
+    const coupleId =
+      existingYours?.coupleId || existingPartner?.coupleId || crypto.randomUUID();
 
     // One upsert (not two) — FK constraint satisfied before user rows are created.
     await prisma.couple.upsert({
@@ -135,7 +142,6 @@ export class AuthService {
   ): Promise<{
     coupleId: string;
     yourToken: TokenPair;
-    partnerToken: TokenPair;
     yourUser: {
       id: string;
       name: string;
@@ -168,30 +174,48 @@ export class AuthService {
     ]);
 
     const coupleId = yourResult.coupleId!;
+    if (partnerResult.coupleId && partnerResult.coupleId !== coupleId) {
+      // The partner's code came from a different pending signup session. The
+      // pair the CALLER initiated wins; the partner's row is re-pointed inside
+      // the transaction below, so DB and JWT stay in agreement.
+      logger.warn(
+        `[AuthService] Partner OTP carried a different coupleId — converging on the caller's session`,
+      );
+    }
 
     const defaultName = (existingYours?.name || existingPartner?.name)
       ? `${existingYours?.name || 'User'} & ${existingPartner?.name || 'Partner'}`
       : 'Sawa Couple';
 
-    // Ensure couple row exists (FK constraint) then upsert users in parallel.
-    const couple = await prisma.couple.upsert({
-      where: { coupleId },
-      update: {},
-      create: { coupleId, profileName: defaultName, isProfileComplete: false, isSubscribed: false },
-    });
+    // ONE transaction for the whole identity write: couple row, both user
+    // rows re-pointed to this coupleId, both marked verified. Before this,
+    // the sequence was bare sequential writes — any mid-sequence failure left
+    // a half-created identity (couple with no users, verified users pointing
+    // at an orphan couple), which is exactly what the field audit found.
+    const { couple, yourUser } = await prisma.$transaction(
+      async (tx) => {
+        const coupleRow = await tx.couple.upsert({
+          where: { coupleId },
+          update: {},
+          create: { coupleId, profileName: defaultName, isProfileComplete: false, isSubscribed: false },
+        });
 
-    await Promise.all([
-      userRepository.upsertByPhone(yourPhone, coupleId, 'primary'),
-      userRepository.upsertByPhone(partnerPhone, coupleId, 'partner'),
-    ]);
+        await userRepository.upsertByPhone(yourPhone, coupleId, 'primary', tx);
+        await userRepository.upsertByPhone(partnerPhone, coupleId, 'partner', tx);
 
-    const [yourUser, partnerUser] = await Promise.all([
-      userRepository.markVerified(yourPhone),
-      userRepository.markVerified(partnerPhone),
-    ]);
+        const you = await userRepository.markVerified(yourPhone, tx);
+        await userRepository.markVerified(partnerPhone, tx);
 
-    // `couple` is already available from the upsert above — no extra findUnique needed.
+        return { couple: coupleRow, yourUser: you };
+      },
+      { timeout: 10000 },
+    );
 
+    // Tokens are minted for THE CALLER ONLY. The old response also signed and
+    // returned the partner's access+refresh tokens — full credentials for
+    // another person's account, delivered to whoever typed the two numbers
+    // (couple-identity audit, critical finding #1). The partner signs in on
+    // their own device via login OTP; their row is already verified above.
     const yourAccessToken = signAccessToken({
       userId: yourUser.id,
       coupleMongoId: couple?.id || undefined,
@@ -203,26 +227,11 @@ export class AuthService {
       coupleId,
     });
 
-    const partnerAccessToken = signAccessToken({
-      userId: partnerUser.id,
-      coupleMongoId: couple?.id || undefined,
-      coupleId,
-    });
-    const partnerRefreshToken = signRefreshToken({
-      userId: partnerUser.id,
-      coupleMongoId: couple?.id || undefined,
-      coupleId,
-    });
-
-    await Promise.all([
-      userRepository.saveRefreshTokenHash(yourUser.id, hashToken(yourRefreshToken)),
-      userRepository.saveRefreshTokenHash(partnerUser.id, hashToken(partnerRefreshToken)),
-    ]);
+    await userRepository.saveRefreshTokenHash(yourUser.id, hashToken(yourRefreshToken));
 
     return {
       coupleId,
       yourToken: { accessToken: yourAccessToken, refreshToken: yourRefreshToken },
-      partnerToken: { accessToken: partnerAccessToken, refreshToken: partnerRefreshToken },
       yourUser: {
         id: yourUser.id,
         name: yourUser.name || '',
@@ -398,45 +407,56 @@ export class AuthService {
     }
 
     // Resolve coupleId with priority:
-    //   1. The user row's own coupleId (most authoritative)
-    //   2. The coupleId stored with the OTP token (set during loginSendOtp)
-    //   3. A couple where this user is partner1 or partner2 (handles legacy rows)
-    //   4. A fresh UUID (absolute last resort — new account scenario)
-    let coupleId: string = user.coupleId || result.coupleId || '';
+    //   1. A couple that REFERENCES this user (partner1/partner2) — the data's
+    //      own record of membership, immune to a stale user-row pointer
+    //   2. The user row's own coupleId
+    //   3. The coupleId stored with the OTP token (set during loginSendOtp)
+    // The old order trusted the user row first — which is exactly the pointer
+    // the pre-audit signup left stale — and its last resort MINTED A FRESH
+    // UUID, silently binding an existing user to a brand-new empty couple and
+    // orphaning their real profile ("logged in and it sent me back to the
+    // questionnaire"). A login must never create a couple.
+    const linked = await prisma.couple.findFirst({
+      where: { OR: [{ partner1Id: user.id }, { partner2Id: user.id }] },
+      select: { coupleId: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const coupleId: string = linked?.coupleId || user.coupleId || result.coupleId || '';
 
     if (!coupleId) {
-      // Neither the user row nor the OTP token has a coupleId — look up via
-      // the Couple table's partner references to avoid creating a duplicate couple.
-      const linked = await prisma.couple.findFirst({
-        where: { OR: [{ partner1Id: user.id }, { partner2Id: user.id }] },
-        select: { coupleId: true },
-      });
-      coupleId = linked?.coupleId ?? crypto.randomUUID();
+      // A verified user with no couple anywhere is broken data, not a flow —
+      // fail loudly instead of manufacturing an empty identity.
+      throw new AppError(
+        'We could not find your couple profile. Please register again or contact support.',
+        409,
+        'COUPLE_NOT_FOUND',
+      );
     }
 
     await assertNotBanned(coupleId);
 
-    // Ensure the couple row exists BEFORE linking the user to it. The User→Couple
-    // foreign key (User.coupleId → Couple.coupleId) rejects any user update whose
-    // coupleId has no matching couple row yet — which is exactly the case for a
-    // freshly generated coupleId (legacy/edge accounts with no couple). Upserting
-    // first guarantees the FK target exists and prevents an "Internal server error"
-    // on an otherwise-valid OTP. Mirrors the signup ordering (couple before user).
-    const couple = await prisma.couple.upsert({
-      where: { coupleId },
-      update: {},
-      create: {
-        coupleId,
-        profileName: user.name || 'Sawa Couple',
-        isProfileComplete: false,
-        isSubscribed: false,
+    // Atomic: ensure the couple row exists (FK target) and repair the user
+    // row's pointer in the same transaction, so a mid-sequence failure can't
+    // leave the two halves disagreeing again.
+    const couple = await prisma.$transaction(
+      async (tx) => {
+        const coupleRow = await tx.couple.upsert({
+          where: { coupleId },
+          update: {},
+          create: {
+            coupleId,
+            profileName: user.name || 'Sawa Couple',
+            isProfileComplete: false,
+            isSubscribed: false,
+          },
+        });
+        if (!user.coupleId || user.coupleId !== coupleId) {
+          await tx.user.update({ where: { id: user.id }, data: { coupleId } });
+        }
+        return coupleRow;
       },
-    });
-
-    // Persist the coupleId back to the user row if it was missing or stale.
-    if (!user.coupleId || user.coupleId !== coupleId) {
-      await prisma.user.update({ where: { id: user.id }, data: { coupleId } });
-    }
+      { timeout: 10000 },
+    );
 
     const accessToken = signAccessToken({
       userId: user.id,
@@ -451,10 +471,19 @@ export class AuthService {
 
     await userRepository.saveRefreshTokenHash(user.id, hashToken(refreshToken));
 
+    // Same shape as GET /couples/me (formatted, sanitized) — the raw Prisma row
+    // used to go out here, so login and profile-fetch returned two different
+    // shapes for the same object (audit: response-shape drift). Fall back to
+    // the raw-ish row only if formatting fails, so login never breaks on it.
+    const { coupleService } = await import('./couple.service');
+    const formattedProfile = await coupleService
+      .getCouple(coupleId)
+      .catch(() => null);
+
     return {
       coupleId,
       token: { accessToken, refreshToken },
-      profile: { ...couple, _id: couple.id },
+      profile: formattedProfile ?? { ...couple, _id: couple.id },
       user: {
         id: user.id,
         _id: user.id,
